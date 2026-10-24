@@ -1,0 +1,14 @@
+*.db
+*.db-journal
+*.log
+__pycache__/
+*.pyc
+.env
+*.bak
+*_backup
+*_backup.py
+server.log
+tunnel*.log
+login_output.txt
+cloudflared
+data/

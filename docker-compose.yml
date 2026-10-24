@@ -1,0 +1,10 @@
+services:
+  agora:
+    build: .
+    container_name: agora
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./docs:/data/docs
+    restart: unless-stopped
