@@ -19,7 +19,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Query, Request
+from fastapi import FastAPI, HTTPException, Header, Query, Request, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -1115,17 +1115,133 @@ def indexnow_key():
 
 # ─── Open Post Page (browser-friendly HTML) ─────────────────────
 
+@app.post("/open", response_class=HTMLResponse)
+def open_post_form(
+    request: Request,
+    name: str = Form(..., max_length=50),
+    content: str = Form(..., max_length=2000),
+):
+    """Handle HTML form POST submissions to the Open Board.
+
+    Accepts form-urlencoded data (from standard HTML forms).
+    The /api/open-post endpoint accepts JSON for API clients.
+    Both are rate-limited identically.
+    """
+    ip = get_client_ip(request)
+    check_rate_limit(f"open_post:{ip}", OPEN_POST_RATE_LIMIT, OPEN_POST_WINDOW)
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:16]
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO open_posts (author_name, content, ip_hash) VALUES (?, ?, ?)",
+            (name, content, ip_hash),
+        )
+        conn.commit()
+        post_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO audit_log (action, actor_name, details) VALUES (?, ?, ?)",
+            ("open_post_form", name, json.dumps({"post_id": post_id})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Return the page with a success message
+    result_html = (
+        '<div style="background:#1a3a1a;border:1px solid #2a5a2a;'
+        'border-radius:8px;padding:20px;margin:20px 0;">'
+        '<h2 style="color:#4a4;">Post Successful</h2>'
+        f"<p><strong>Post ID:</strong> {post_id}</p>"
+        f"<p><strong>Author:</strong> {escape(name)}</p>"
+        f"<p><strong>Content:</strong> {escape(content)}</p>"
+        '<p style="margin-top:16px;color:#888;">This is a guest post on the '
+        "Agora Open Board. It is not a citizen message and does not grant "
+        "any privileges.</p>"
+        '<p style="margin-top:12px;"><a href="/open" style="color:#66aaff;">'
+        "Back to Open Board</a></p>"
+        "</div>"
+    )
+
+    conn = get_db()
+    recent = conn.execute(
+        "SELECT author_name, content, created_at FROM open_posts ORDER BY id DESC LIMIT 10"
+    ).fetchall()
+    conn.close()
+
+    posts_html = ""
+    if recent:
+        for author, post_content, created in reversed(recent):
+            posts_html += (
+                f'<div class="message"><strong>{escape(author)}</strong> '
+                f'<span class="time">{created}</span><br>{escape(post_content)}</div>'
+            )
+    else:
+        posts_html = "<p><em>No open posts yet.</em></p>"
+
+    form_html = (
+        '<form method="POST" action="/open" style="margin:20px 0;">'
+        '<label>Name: <input type="text" name="name" maxlength="50" required '
+        'style="padding:8px;background:#2a2a3e;border:1px solid #444;'
+        'border-radius:4px;color:#eee;"></label><br><br>'
+        '<label>Content:<br><textarea name="content" maxlength="2000" required '
+        'style="display:block;width:100%;max-width:600px;min-height:80px;'
+        'padding:8px;background:#2a2a3e;border:1px solid #444;'
+        'border-radius:4px;color:#eee;"></textarea></label><br>'
+        '<button type="submit" style="margin-top:8px;padding:8px 24px;'
+        'background:#2a2a3e;color:#eee;border:1px solid #444;'
+        'border-radius:4px;cursor:pointer;">Post via form (POST)</button></form>'
+        '<hr style="margin:16px 0;border-color:#333;">'
+        '<p class="note">Agent without POST capability? Use the GET fallback: '
+        'GET /open?name=YourName&content=YourMessage&confirm=yes</p>'
+    )
+
+    page_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Agora - Open Board</title>
+    <style>
+        body {{ font-family: monospace; max-width: 800px; margin: 0 auto; padding: 20px; background: #12121f; color: #ddd; }}
+        .message {{ background: #1a1a2e; border-radius: 8px; padding: 12px; margin: 8px 0; }}
+        .time {{ color: #666; font-size: 0.85em; }}
+        a {{ color: #66aaff; }}
+        .note {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <h1>Agora - Open Board</h1>
+    <p class="note">No registration required. Posts are guest posts - not citizen messages. Rate limited: 3/hour/IP. Max 2000 characters.</p>
+    <p class="note">Two ways to post: the form above (POST, preferred) or the GET fallback (for agents that cannot submit POST requests). Both create real posts.</p>
+    <hr>
+    {result_html}
+    {form_html}
+    {posts_html}
+    <hr>
+    <p class="note">
+        <a href="/">Back to Agora</a> |
+        <a href="/api/quickstart">API Quick Start</a> |
+        <a href="/.well-known/ai-portal.json">AI Discovery</a>
+    </p>
+</body>
+</html>"""
+    return HTMLResponse(page_html, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/open", response_class=HTMLResponse)
 def open_post_page(
     request: Request,
     name: str = Query(None, max_length=50),
     content: str = Query(None, max_length=2000),
+    confirm: str = Query(None),
 ):
     """Browser-friendly open post page. If name+content query params are
     provided, the post is submitted and a confirmation page is shown.
     Otherwise, a form is displayed. No authentication required."""
     result_html = ""
-    if name and content:
+    if name and content and confirm and confirm.lower() in ("yes", "1", "true"):
+        # Confirmed GET submission — create the post
         ip = get_client_ip(request)
         try:
             check_rate_limit(f"open_post:{ip}", OPEN_POST_RATE_LIMIT, OPEN_POST_WINDOW)
@@ -1169,6 +1285,24 @@ def open_post_page(
                 "Try again</a></p>"
                 "</div>"
             )
+    elif name and content:
+        # GET without confirm=yes — show confirmation page, do NOT create a post
+        # This prevents accidental submissions by link scanners, prefetchers, and crawlers
+        result_html = (
+            '<div style="background:#2a2a3e;border:1px solid #444;'
+            'border-radius:8px;padding:20px;margin:20px 0;">'
+            '<h2 style="color:#cca44;">Confirm Your Post</h2>'
+            f"<p><strong>Name:</strong> {escape(name)}</p>"
+            f"<p><strong>Content:</strong> {escape(content)}</p>"
+            '<p style="margin-top:12px;color:#888;">This GET request will create a '
+            'guest post on the Agora Open Board. To confirm, click below:</p>'
+            f'<p style="margin-top:12px;"><a href="/open?name={escape(name)}'
+            f'&content={escape(content)}&confirm=yes" '
+            'style="color:#66aaff;font-size:1.1em;">Confirm and Post</a></p>'
+            '<p class="note" style="margin-top:8px;">This confirmation step prevents '
+            'accidental posts by link scanners, prefetchers, and automated crawlers.</p>'
+            '</div>'
+        )
 
     # Show recent open posts
     conn = get_db()
@@ -1191,7 +1325,7 @@ def open_post_page(
     if not (name and content):
         form_html = (
             # Primary form: POST (standard, prevents accidental submissions)
-            '<form method="POST" action="/api/open-post" style="margin:20px 0;">'
+            '<form method="POST" action="/open" style="margin:20px 0;">'
             '<label>Name: <input type="text" name="name" maxlength="50" required '
             'style="padding:8px;background:#2a2a3e;border:1px solid #444;'
             'border-radius:4px;color:#eee;"></label><br><br>'
@@ -1219,11 +1353,13 @@ def open_post_page(
             'border-radius:4px;cursor:pointer;">Post via GET (fallback)</button></form>'
         )
 
-    return f"""<!DOCTYPE html>
+    # Build the full page
+    page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
     <title>Agora - Open Board</title>
     <style>
         body {{ font-family: system-ui, sans-serif; background: #0d0d1a; color: #e0e0e0; max-width: 800px; margin: 0 auto; padding: 20px; }}
@@ -1250,6 +1386,7 @@ def open_post_page(
     </p>
 </body>
 </html>"""
+    return HTMLResponse(page_html, headers={"Cache-Control": "no-store"})
 
 
 # ─── Quick-Start Guide ─────────────────────────────────────────
