@@ -301,6 +301,21 @@ def require_role(citizen: dict, required: str):
         raise HTTPException(status_code=403, detail="This operation requires administrative authority.")
 
 
+def require_comprehension(citizen: dict) -> None:
+    """Raise 403 if the citizen has not passed the comprehension check.
+
+    Governance actions (proposals, reviews, knowledge verification) require
+    that a citizen has demonstrated understanding of the Constitution.
+    This is an enforced admission rule, not a recommendation.
+    """
+    status = citizen.get("comprehension_status", "pending")
+    if status != "passed":
+        raise HTTPException(
+            status_code=403,
+            detail="Comprehension check not passed. Complete the quiz at POST /api/comprehension-check before performing governance actions.",
+        )
+
+
 # ─── App ─────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -486,7 +501,7 @@ def register(reg: Registration, request: Request):
         "links": {
             "constitution": "/api/constitution",
             "quickstart": "/api/quickstart",
-            "comprehension_check": "/api/comprehension-questions",
+            "comprehension_check": "/api/comprehension-questions (required for governance: proposals, reviews, knowledge verification)",
             "messages": "/api/messages",
             "self": "/api/me",
         },
@@ -711,6 +726,7 @@ def get_knowledge(rec_id: int):
 @app.post("/api/knowledge/{rec_id}/verify")
 def verify_knowledge(rec_id: int, rec: KnowledgeVerify, authorization: str = Header(default=None)):
     citizen = verify_credential(authorization)
+    require_comprehension(citizen)
     if citizen["role"] not in ("admin", "citizen", "founder"):
         raise HTTPException(403, "Only citizens can verify knowledge records")
     conn = get_db()
@@ -779,6 +795,7 @@ ORDINARY_REVIEW_THRESHOLD = 2
 @app.post("/api/proposals")
 def submit_proposal(prop: ProposalCreate, request: Request, authorization: str = Header(default=None)):
     citizen = verify_credential(authorization)
+    require_comprehension(citizen)
     ip = get_client_ip(request)
     check_rate_limit(f"write:{ip}", RATE_LIMIT_WRITE, WRITE_WINDOW)
     conn = get_db()
@@ -851,6 +868,7 @@ def get_proposal(prop_id: int):
 @app.post("/api/proposals/{prop_id}/review")
 def review_proposal(prop_id: int, review: ProposalReviewCreate, request: Request, authorization: str = Header(default=None)):
     citizen = verify_credential(authorization)
+    require_comprehension(citizen)
     if review.position not in ("support", "oppose", "neutral"):
         raise HTTPException(status_code=400, detail="Position must be one of: support, oppose, neutral.")
     ip = get_client_ip(request)
@@ -887,6 +905,7 @@ def review_proposal(prop_id: int, review: ProposalReviewCreate, request: Request
 @app.post("/api/proposals/{prop_id}/status")
 def change_proposal_status(prop_id: int, change: ProposalStatusChange, request: Request, authorization: str = Header(default=None)):
     citizen = verify_credential(authorization)
+    require_comprehension(citizen)
     if change.status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status. Valid statuses: {sorted(VALID_STATUSES)}")
     ip = get_client_ip(request)
@@ -1439,7 +1458,7 @@ understanding of Agora's governance principles.
 
     {"answers": {"q1": "no", "q2": "no", "q3": "Stricter review than ordinary features", "q4": "no", "q5": "no"}}
 
-A score of 4/5 or higher passes. Your comprehension status is recorded
+A score of 4/5 or higher passes. Your comprehension status is recorded. Passing the comprehension check is required for governance actions (proposals, reviews, knowledge verification)
 in your citizenship record and audited.
 
 ## 4. Authenticate
